@@ -4,6 +4,7 @@ import io.gengdy.pan.model.Paper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.w3c.dom.*;
+
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.net.URI;
 import java.net.http.*;
@@ -11,39 +12,76 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * ArxivCrawlerService
+ * <p>
+ * Fetches daily papers from arXiv using the official OAI-PMH API:
+ * https://oaipmh.arxiv.org/oai
+ * <p>
+ * --- Date & Timezone ---
+ * arXiv releases new papers nightly according to US Eastern Time (ET).
+ * Therefore, "today" is defined using the fixed timezone America/New_York
+ * to align with arXiv’s publication schedule.
+ * <p>
+ * Configurable properties:
+ * - arxiv.oai-url       (default: https://oaipmh.arxiv.org/oai)
+ * - arxiv.categories    (default: cs.AI, comma-separated list)
+ * <p>
+ * Output model: io.gengdy.pan.model.Paper
+ */
 @Service
-public class ArxivCrawlerService {
+public class ArxivCrawlerService
+{
 
-    @Value("${arxiv.oai-url:https://oaipmh.arxiv.org/oai}")
+    @Value("${arxiv.oai-url}")
     private String oaiUrl;
 
-    @Value("${arxiv.categories:cs.AI}")
-    private String categories;
+    @Value("${arxiv.categories}")
+    private String categoriesCsv;
 
-    @Value("${arxiv.timezone:America/New_York}")
-    private String timezone;
+    /**
+     * Fixed timezone to align with arXiv’s nightly publication batch.
+     */
+    private static final ZoneId ET = ZoneId.of("America/New_York");
 
-    private final HttpClient http = HttpClient.newHttpClient();
+    /**
+     * Reusable HTTP client
+     */
+    private final HttpClient http = HttpClient.newBuilder()
+            .proxy(java.net.ProxySelector.getDefault())
+            .build();
 
+    /**
+     * Fetch papers published "today" according to Eastern Time.
+     */
     public List<Paper> fetchTodayPapers() throws Exception
     {
-        ZoneId zone = ZoneId.of(timezone);
-        LocalDate today = LocalDate.now(zone);
-        String from = today.toString();
-        String until = today.toString();
+        LocalDate todayET = LocalDate.now(ET);
+        return fetchPapersByDate(todayET);
+    }
 
-        List<String> categoryList = Arrays.stream(categories.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
+    /**
+     * Fetch all papers for a specific date (based on Eastern Time).
+     * Uses OAI-PMH ListRecords between from=until=YYYY-MM-DD.
+     */
+    public List<Paper> fetchPapersByDate(LocalDate dateET) throws Exception
+    {
+        String from = dateET.format(DateTimeFormatter.ISO_DATE);
+        String until = from;
 
-        Map<String, Paper> all = new LinkedHashMap<>();
+        List<String> categoryList = Arrays.stream(
+                        Optional.ofNullable(categoriesCsv).orElse("cs.AI").split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
+
+        Map<String, Paper> merged = new LinkedHashMap<>();
 
         for (String cat : categoryList)
         {
-            String set = toOaiSet(cat);
+            String set = toOaiSet(cat); // e.g., cs.AI -> cs:cs:AI
             if (set == null) continue;
 
             String token = null;
@@ -57,25 +95,25 @@ public class ArxivCrawlerService {
                 ParseResult pr = parseOaiListRecords(xml);
                 token = pr.resumptionToken;
 
-                for (ArxivItem item : pr.records)
+                for (ArxivItem it : pr.records)
                 {
-                    String authors = String.join(", ", item.authors);
+                    String authors = String.join(", ", it.authors);
                     Paper p = new Paper(
-                            item.id,
-                            item.title,
+                            it.idNoVersion,
+                            it.title,
                             authors,
-                            item.abstractText,
-                            item.absUrl
+                            it.abstractText,
+                            "https://arxiv.org/abs/" + it.idNoVersion
                     );
-                    all.putIfAbsent(item.id, p);
+                    merged.putIfAbsent(it.idNoVersion, p); // deduplicate across categories
                 }
             } while (token != null && !token.isBlank());
         }
 
-        return new ArrayList<>(all.values());
+        return new ArrayList<>(merged.values());
     }
 
-    // ---------- HTTP & XML ----------
+    // ---------------- HTTP & URI ----------------
 
     private static URI buildListRecordsUri(String base, String from, String until, String set)
     {
@@ -88,16 +126,37 @@ public class ArxivCrawlerService {
 
     private static URI buildListRecordsWithTokenUri(String base, String token)
     {
-        return URI.create(String.format("%s?verb=ListRecords&resumptionToken=%s", base, urlEncode(token)));
+        return URI.create(String.format("%s?verb=ListRecords&resumptionToken=%s",
+                base, urlEncode(token)));
     }
 
     private String httpGet(URI uri) throws Exception
     {
         HttpRequest req = HttpRequest.newBuilder(uri)
-                .header("User-Agent", "ArxivCrawlerService/1.0 (mailto:your@email)")
-                .GET().build();
-        return http.send(req, BodyHandlers.ofString()).body();
+                .header("User-Agent", "ArxivCrawlerService/1.0 (mailto:you@example.com)")
+                .timeout(java.time.Duration.ofSeconds(20))
+                .GET()
+                .build();
+
+        int attempts = 0;
+        while (true)
+        {
+            attempts++;
+            try
+            {
+                return http.send(req, BodyHandlers.ofString()).body();
+            } catch (java.net.ConnectException | java.net.http.HttpTimeoutException e)
+            {
+                if (attempts >= 3)
+                {
+                    throw new RuntimeException("Connect failed after " + attempts + " attempts. URI=" + uri, e);
+                }
+                Thread.sleep(400L * attempts);
+            }
+        }
     }
+
+    // ---------------- OAI-PMH XML Parsing ----------------
 
     private static ParseResult parseOaiListRecords(String xml) throws Exception
     {
@@ -113,29 +172,48 @@ public class ArxivCrawlerService {
             if (token != null) token = token.trim();
         }
 
-        List<ArxivItem> list = new ArrayList<>();
+        List<ArxivItem> out = new ArrayList<>();
         NodeList recs = doc.getElementsByTagName("record");
 
         for (int i = 0; i < recs.getLength(); i++)
         {
             Element rec = (Element) recs.item(i);
+
+            // Skip deleted records
+            Element header = first(rec, "header");
+            if (header != null)
+            {
+                String status = header.getAttribute("status");
+                if ("deleted".equalsIgnoreCase(status))
+                {
+                    continue;
+                }
+            }
+
+            // Parse arXiv identifier (e.g., oai:arXiv:2501.01234v1)
             String identifier = text(first(rec, "header", "identifier"));
-            String arxivId = extractArxivIdFromOaiIdentifier(identifier);
+            String arxivIdWithVersion = extractArxivIdFromOaiIdentifier(identifier);
+            if (arxivIdWithVersion == null || arxivIdWithVersion.isBlank()) continue;
+            String idNoVersion = stripVersion(arxivIdWithVersion);
+
+            // Metadata section
             Element md = first(rec, "metadata");
             if (md == null) continue;
             Element arxiv = first(md, "arXiv");
             if (arxiv == null) continue;
 
-            String title = text(first(arxiv, "title"));
-            String abs = text(first(arxiv, "abstract"));
+            String title = nullToEmpty(text(first(arxiv, "title")));
+            String abs = nullToEmpty(text(first(arxiv, "abstract")));
             String created = text(first(arxiv, "created"));
 
+            // Parse authors
             List<String> authors = new ArrayList<>();
             Element authorsEl = first(arxiv, "authors");
             if (authorsEl != null)
             {
                 NodeList aNodes = authorsEl.getElementsByTagName("author");
-                for (int j = 0; j < aNodes.getLength(); j++) {
+                for (int j = 0; j < aNodes.getLength(); j++)
+                {
                     Element a = (Element) aNodes.item(j);
                     String keyname = text(first(a, "keyname"));
                     String forenames = text(first(a, "forenames"));
@@ -146,21 +224,27 @@ public class ArxivCrawlerService {
                 }
             }
 
-            String idNoVer = stripVersion(arxivId);
-            String absUrl = "https://arxiv.org/abs/" + idNoVer;
-
-            ArxivItem item = new ArxivItem(idNoVer, title, abs, authors, absUrl);
-            item.created = parseInstant(created);
-            list.add(item);
+            ArxivItem item = new ArxivItem();
+            item.idNoVersion = idNoVersion;
+            item.idWithVersion = arxivIdWithVersion;
+            item.title = title;
+            item.abstractText = abs;
+            item.authors = authors;
+            item.created = parseInstantDate(created);
+            out.add(item);
         }
 
         ParseResult pr = new ParseResult();
-        pr.records = list;
+        pr.records = out;
         pr.resumptionToken = (token != null && !token.isBlank()) ? token : null;
         return pr;
     }
 
-    // ---------- helper method  ----------
+    // ---------------- Utilities ----------------
+
+    /**
+     * Converts cs.AI -> cs:cs:AI (OAI set name format).
+     */
     private static String toOaiSet(String cat)
     {
         if (cat == null || !cat.contains(".")) return null;
@@ -168,13 +252,26 @@ public class ArxivCrawlerService {
         return p[0] + ":" + p[0] + ":" + p[1];
     }
 
-    private static String extractArxivIdFromOaiIdentifier(String oaiId)
+    /**
+     * Extracts arXiv ID (with version) from oai:arXiv:XXXXvY safely.
+     */
+    private static String extractArxivIdFromOaiIdentifier(String s)
     {
-        if (oaiId == null) return null;
-        int idx = oaiId.indexOf("oai:arXiv:");
-        return idx >= 0 ? oaiId.substring(idx + "oai:arXiv:".length()) : oaiId;
+        if (s == null) return null;
+        s = s.trim();
+        Matcher m = Pattern.compile("^oai:arXiv:(\\S+)$").matcher(s);
+        if (m.find()) return m.group(1);
+        int idx = s.lastIndexOf(':');
+        if (idx >= 0 && idx + 1 < s.length())
+        {
+            return s.substring(idx + 1).trim();
+        }
+        return s;
     }
 
+    /**
+     * Removes version suffix (2501.01234v2 -> 2501.01234).
+     */
     private static String stripVersion(String arxivId)
     {
         if (arxivId == null) return null;
@@ -182,8 +279,20 @@ public class ArxivCrawlerService {
         return (v > 0) ? arxivId.substring(0, v) : arxivId;
     }
 
-    private static Instant parseInstant(String yyyyMmDd)
+    private static String urlEncode(String s)
     {
+        try
+        {
+            return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e)
+        {
+            return s;
+        }
+    }
+
+    private static Instant parseInstantDate(String yyyyMmDd)
+    {
+        if (yyyyMmDd == null || yyyyMmDd.isBlank()) return null;
         try
         {
             LocalDate d = LocalDate.parse(yyyyMmDd, DateTimeFormatter.ISO_DATE);
@@ -212,41 +321,26 @@ public class ArxivCrawlerService {
         return (node == null) ? null : node.getTextContent();
     }
 
-    private static String safe(String s)
+    private static String nullToEmpty(String s)
     {
-        return s == null ? "" : s;
-    }
-    private static String urlEncode(String s)
-    {
-        try
-        {
-            return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8);
-        }
-        catch (Exception e)
-        {
-            return s;
-        }
+        return (s == null) ? "" : s.trim();
     }
 
-    // ---------- Internal Data Structure ----------
+    private static String safe(String s)
+    {
+        return (s == null) ? "" : s;
+    }
+
+    // ---------------- Internal Structures ----------------
+
     private static class ArxivItem
     {
-        String id;
+        String idNoVersion;     // e.g., 2501.01234
+        String idWithVersion;   // e.g., 2501.01234v1
         String title;
         String abstractText;
         List<String> authors;
-        String absUrl;
         Instant created;
-
-        public ArxivItem(String id, String title, String abstractText,
-                         List<String> authors, String absUrl)
-        {
-            this.id = id;
-            this.title = title;
-            this.abstractText = abstractText;
-            this.authors = authors;
-            this.absUrl = absUrl;
-        }
     }
 
     private static class ParseResult

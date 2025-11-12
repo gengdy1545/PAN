@@ -16,8 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestPropertySource(properties = {
         "pan.home=/home/gengdy/opt/arxiv_mailer/",
         "arxiv.oai-url=https://oaipmh.arxiv.org/oai",
-        "arxiv.categories=cs.AI,cs.CV",
-        "arxiv.timezone=Asia/Shanghai"
+        "arxiv.categories=cs.DB"
 })
 public class ArxivCrawlerTest
 {
