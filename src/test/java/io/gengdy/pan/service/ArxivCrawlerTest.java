@@ -15,8 +15,9 @@ import static org.junit.jupiter.api.Assertions.*;
 @SpringBootTest(classes = {ArxivSummaryMailerApplication.class})
 @TestPropertySource(properties = {
         "pan.home=/home/gengdy/opt/arxiv_mailer/",
-        "arxiv.list-url-template=https://arxiv.org/list/{category}/new",
-        "arxiv.categories=cs.AI,cs.CV"
+        "arxiv.oai-url=https://oaipmh.arxiv.org/oai",
+        "arxiv.categories=cs.AI,cs.CV",
+        "arxiv.timezone=Asia/Shanghai"
 })
 public class ArxivCrawlerTest
 {
@@ -24,8 +25,9 @@ public class ArxivCrawlerTest
     private ArxivCrawlerService crawlerService;
 
     @Test
-    public void testFetchRecentPapers() {
-        List<Paper> papers = crawlerService.fetchRecentPapers();
+    public void testFetchRecentPapers() throws Exception
+    {
+        List<Paper> papers = crawlerService.fetchTodayPapers();
 
         assertNotNull(papers, "Paper list should not be null");
         assertFalse(papers.isEmpty(),
