@@ -78,5 +78,5 @@ nohup $PAN_HOME/bin/start.sh > /dev/null 2>&1 &
 
 **Q: How do I use a Proxy locally?** A: Edit script/start.sh and add your proxy configuration to JAVA_OPTS:
 ```bash
-JAVA_OPTS="... -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=7890"
+JAVA_OPTS="... -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=10808 -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=10808"
 ```
