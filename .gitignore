@@ -3,6 +3,13 @@ target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
+logs/
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store
 
 ### STS ###
 .apt_generated
