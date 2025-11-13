@@ -14,9 +14,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(classes = {ArxivSummaryMailerApplication.class})
 @TestPropertySource(properties = {
-        "pan.home=/home/gengdy/opt/arxiv_mailer/",
-        "arxiv.oai-url=https://oaipmh.arxiv.org/oai",
-        "arxiv.categories=cs.DB"
+        "pan.home=/home/gengdy/opt/arxiv_mailer/"
 })
 public class ArxivCrawlerTest
 {
