@@ -40,6 +40,14 @@ public class GeminiAIService
                 continue;
             }
             paper.setAiSummary(summary);
+
+            try
+            {
+                Thread.sleep(6000); // Sleep for 6 seconds to avoid rate limiting
+            } catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }
