@@ -52,7 +52,9 @@ public class ArxivCrawlerService
      * Reusable HTTP client
      */
     private final HttpClient http = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
             .proxy(java.net.ProxySelector.getDefault())
+            .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
     /**
@@ -133,7 +135,7 @@ public class ArxivCrawlerService
     private String httpGet(URI uri) throws Exception
     {
         HttpRequest req = HttpRequest.newBuilder(uri)
-                .header("User-Agent", "ArxivCrawlerService/1.0 (mailto:you@example.com)")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .timeout(java.time.Duration.ofSeconds(20))
                 .GET()
                 .build();
