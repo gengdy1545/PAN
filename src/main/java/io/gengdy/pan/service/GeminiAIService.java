@@ -2,9 +2,11 @@ package io.gengdy.pan.service;
 
 import com.google.genai.Client;
 import com.google.genai.types.GenerateContentResponse;
-import io.gengdy.pan.exception.GeminiException;
+import io.gengdy.pan.model.Paper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 @Service
 public class GeminiAIService
@@ -22,20 +24,22 @@ public class GeminiAIService
         this.geminiClient = geminiClient;
     }
 
-    public String generateSummary(String text) throws GeminiException
+    public void summarizePaper(List<Paper> papers)
     {
-        try
+        for (Paper paper : papers)
         {
-            GenerateContentResponse response = this.geminiClient.models.generateContent(
+            GenerateContentResponse response  = this.geminiClient.models.generateContent(
                     modelName,
-                    prompt + "\n\n" + text,
+                    prompt + "\n\nAbstract:\n" + paper.getAbstractText(),
                     null
             );
 
-            return response.text().trim();
-
-        } catch (Exception e) {
-            throw new GeminiException("Failed to generate summary using Gemini AI.", e);
+            String summary = response.text().trim();
+            if (summary.isEmpty())
+            {
+                continue;
+            }
+            paper.setAiSummary(summary);
         }
     }
 }
