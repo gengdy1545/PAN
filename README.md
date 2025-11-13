@@ -9,26 +9,27 @@ It periodically crawls Arxiv for new submissions, generates concise, beginner-fr
 * **Google Gemini API Key**
 * **SMTP Email Account** (QQ Mail)
 
-## 🚀 Installation
+## 🚀 Installation (Local deployment)
+
+### 1. Setup Directory
 
 The system requires a dedicated directory for operation.
 
-1. Setup Directory
 ```bash
 mkdir -p ~/opt/arxiv_mailer
 echo 'export PAN_HOME=$HOME/opt/arxiv_mailer' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-2. Build & Install: Run the provided installation script from the project root directory.
+### 2. Build & Install
+
+Run the provided installation script from the project root directory.
 
 ```bashbash
 ./install.sh
 ```
 
-## ⚙️ Configuration
-
-### Configuration File
+### 3. Configuration
 
 After installation, edit the configuration file at `$PAN_HOME/etc/pan.properties`:
 
@@ -59,7 +60,8 @@ arxiv.categories=cs.DB
 # Default: 10:00 AM (Asia/Shanghai) on Weekdays
 pan.schedule.cron=0 0 10 ? * MON-FRI
 ```
-## 💻 Usage
+
+### 4. Launch the Application
 
 In local **deamon** mode, the application stays running and triggers the task automatically according to pan.schedule.cron.
 
@@ -73,7 +75,41 @@ nohup $PAN_HOME/bin/start.sh > /dev/null 2>&1 &
 
 **Logs**: Check $PAN_HOME/log/pan.log for output.
 
+## ☁️ Cloud Deployment (AWS Serverless)
+
+The serverless solution using AWS ECS (Fargate) + EventBridge Scheduler offers extremely low costs and eliminates the need for server maintenance.
+
+### 1. Build Docker Image
+
+Check the push commands on AWS ECR.
+
+### 2. Configure AWS ECS (Fargate)
+
+Create Cluster: Select Networking only (Fargate).
+
+Create Task Definition:
+  * Launch type: FARGATE
+  * OS: Linux
+  * CPU/Memory: 1 vCPU / 3 GB (default)
+  * Environment Variables (critical): Override configuration here; do not package into the image.
+    * PAN_MODE = oneshot (Required)
+    * SPRING_MAIL_USERNAME = ...
+    * SPRING_MAIL_PASSWORD = ...
+    * MAILER_RECIPIENTS = ...
+    * GEMINI_API_KEY = ...
+    * ARXIV_CATEGORIES = cs.DB (Optional, overrides default field)
+
+### 3. Set up scheduled trigger (EventBridge)
+
+Create an EventBridge Schedule:
+  * Schedule type: Cron-based
+  * Cron expression: 0 10 ? * MON-FRI * (UTC time 02:00, corresponding to Beijing time 10:00)
+  * Target: ECS RunTask (pointing to your Cluster and Task Definition)
+  * Network: Ensure public IP is assigned (Enabled), otherwise Arxiv/Gmail cannot be accessed.
+
 ## ❓ Troubleshooting
+**Q: I see ServerException: 503 The model is overloaded logs.** A: The system has built-in retry logic (up to 3 attempts with delays). If this persists, try increasing the delay in GeminiAIService.java or reducing the number of papers processed at once.
+
 **Q: The crawler returns 0 papers.** A: Arxiv does not update on weekends (Friday/Saturday EST). Ensure your system time and timezone are correct. The crawler uses America/New_York time internally to match Arxiv's schedule.
 
 **Q: How do I use a Proxy locally?** A: Edit script/start.sh and add your proxy configuration to JAVA_OPTS:
