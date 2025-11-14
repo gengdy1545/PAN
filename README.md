@@ -39,6 +39,27 @@ After installation, edit the configuration file at `$PAN_HOME/etc/pan.properties
 # 'oneshot': Run once and exit (Cloud/Docker)
 pan.mode=daemon
 
+# ===========================
+# Scheduling (For daemon mode)
+# ===========================
+# Cron expression: Seconds Minutes Hours Day Month Week
+# Morning job: 10:00 AM Shanghai Time (covers yesterday 9:00 -> today 9:00)
+pan.schedule.cron-morning=0 0 9 ? * MON-FRI
+
+# Evening job: 10:00 PM Shanghai Time (covers today 9:00 -> today 21:00)
+pan.schedule.cron-evening=0 0 21 ? * MON-FRI
+
+# ===========================
+# Window configuration
+# ===========================
+# Anchor hour for daily window (local time 0-23)
+# Morning window: [yesterday anchor-hour, today anchor-hour]
+pan.window.anchor-hour=9
+
+# Evening window end hour (local time 0-23, should be > anchor-hour)
+# Evening window: [today anchor-hour, today evening-end-hour]
+pan.window.evening-end-hour=21
+
 # --- Email Settings (Example: QQ Mail) ---
 spring.mail.host=smtp.qq.com
 spring.mail.port=465
@@ -54,11 +75,6 @@ gemini.model-name=gemini-1.5-flash
 # --- Arxiv Settings ---
 # Comma-separated categories (e.g., cs.AI, cs.LG, cs.CV)
 arxiv.categories=cs.DB
-
-# --- Scheduler (Daemon Mode Only) ---
-# Cron expression: Seconds Minutes Hours Day Month Week
-# Default: 10:00 AM (Asia/Shanghai) on Weekdays
-pan.schedule.cron=0 0 10 ? * MON-FRI
 ```
 
 ### 4. Launch the Application
@@ -101,9 +117,9 @@ Create Task Definition:
 
 ### 3. Set up scheduled trigger (EventBridge)
 
-Create an EventBridge Schedule:
+Create Two EventBridge Schedule:
   * Schedule type: Cron-based
-  * Cron expression: 0 10 ? * MON-FRI * (UTC time 02:00, corresponding to Beijing time 10:00)
+  * Cron expression: `0 9 ? * * *` and `0 21 ? * * *`
   * Target: ECS RunTask (pointing to your Cluster and Task Definition)
   * Network: Ensure public IP is assigned (Enabled), otherwise Arxiv/Gmail cannot be accessed.
 
