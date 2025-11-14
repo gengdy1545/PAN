@@ -287,7 +287,7 @@ public class ArxivCrawlerService
                 {
                     throw new RuntimeException("Connect failed after " + attempts + " attempts. URI=" + uri, e);
                 }
-                Thread.sleep(400L * attempts);
+                Thread.sleep(60000L); // Wait 60 seconds before retrying
             }
         }
     }
