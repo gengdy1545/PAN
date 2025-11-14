@@ -29,6 +29,7 @@
         <dep.google-genai.version>1.23.0</dep.google-genai.version>
         <dep.jsoup.version>1.21.2</dep.jsoup.version>
         <dep.junit-jupiter.version>6.0.0</dep.junit-jupiter.version>
+        <dep.maven-compiler-plugin.version>3.8.1</dep.maven-compiler-plugin.version>
     </properties>
 
     <repositories>
@@ -81,6 +82,7 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${dep.spring-boot.version}</version>
                 <executions>
                     <execution>
                         <goals>
@@ -93,6 +95,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
+                <version>${dep.maven-compiler-plugin.version}</version>
                 <configuration>
                     <source>17</source> <target>17</target>
                     <skip>true</skip>

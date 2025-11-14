@@ -7,131 +7,263 @@ import org.w3c.dom.*;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.net.URI;
-import java.net.http.*;
-import java.net.http.HttpResponse.BodyHandlers;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * ArxivCrawlerService
  * <p>
- * Fetches daily papers from arXiv using the official OAI-PMH API:
- * https://oaipmh.arxiv.org/oai
+ * Fetches papers from arXiv using the export API:
+ * https://export.arxiv.org/api/query
  * <p>
- * --- Date & Timezone ---
- * arXiv releases new papers nightly according to US Eastern Time (ET).
- * Therefore, "today" is defined using the fixed timezone America/New_York
- * to align with arXiv’s publication schedule.
+ * Time window logic (configurable zone, typically Asia/Shanghai):
  * <p>
- * Configurable properties:
- * - arxiv.oai-url       (default: https://oaipmh.arxiv.org/oai)
- * - arxiv.categories    (default: cs.AI, comma-separated list)
+ * - Morning job (around anchor-hour, e.g. 09:00 local time):
+ * Fetch papers submitted in [yesterday anchor-hour, today anchor-hour]
  * <p>
- * Output model: io.gengdy.pan.model.Paper
+ * - Evening job (around evening-end-hour, e.g. 21:00 local time):
+ * Fetch papers submitted in [today anchor-hour, today evening-end-hour]
+ * <p>
+ * Which window is used is determined by the current local time:
+ * - If now < evening-end-hour  -> morning window
+ * - Else                       -> evening window
+ * <p>
+ * NOTE: In practice, this service is triggered by two cron jobs:
+ * pan.schedule.cron-morning (at anchor-hour)
+ * pan.schedule.cron-evening (at evening-end-hour)
+ * so the above logic aligns naturally with the cron configuration.
  */
 @Service
 public class ArxivCrawlerService
 {
 
-    @Value("${arxiv.oai-url}")
-    private String oaiUrl;
+    /**
+     * Base URL for the arXiv export API.
+     * Example: https://export.arxiv.org/api/query
+     */
+    @Value("${arxiv.export-url}")
+    private String exportUrl;
 
+    /**
+     * Comma-separated category list, e.g. "cs.AI,cs.CL".
+     */
     @Value("${arxiv.categories}")
     private String categoriesCsv;
 
     /**
-     * Fixed timezone to align with arXiv’s nightly publication batch.
+     * Time zone ID string, e.g. "Asia/Shanghai".
+     * Shared with scheduling configuration.
      */
-    private static final ZoneId ET = ZoneId.of("America/New_York");
+    @Value("${pan.schedule.zone}")
+    private String zoneIdString;
 
     /**
-     * Reusable HTTP client
+     * Anchor hour for the daily window (0-23, local time).
+     * Morning window: [yesterday anchor-hour, today anchor-hour]
+     */
+    @Value("${pan.window.anchor-hour:9}")
+    private int windowAnchorHour;
+
+    /**
+     * Evening window end hour (0-23, local time).
+     * Evening window: [today anchor-hour, today evening-end-hour]
+     */
+    @Value("${pan.window.evening-end-hour:21}")
+    private int windowEveningEndHour;
+
+    /**
+     * Parsed ZoneId, lazily initialized from configuration.
+     */
+    private ZoneId zoneId;
+
+    /**
+     * Shared HTTP client for all requests.
      */
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
-            .proxy(java.net.ProxySelector.getDefault())
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
     /**
-     * Fetch papers published "today" according to Eastern Time.
+     * Lazily resolve and cache the ZoneId from configuration.
      */
-    public List<Paper> fetchTodayPapers() throws Exception
+    private ZoneId getZoneId()
     {
-        LocalDate todayET = LocalDate.now(ET);
-        return fetchPapersByDate(todayET);
+        if (zoneId == null)
+        {
+            zoneId = ZoneId.of(zoneIdString);
+        }
+        return zoneId;
     }
 
     /**
-     * Fetch all papers for a specific date (based on Eastern Time).
-     * Uses OAI-PMH ListRecords between from=until=YYYY-MM-DD.
+     * Entry point used by scheduled tasks.
+     * <p>
+     * Window selection:
+     * <p>
+     * - If current local time < evening-end-hour:
+     * "morning window": [yesterday anchor-hour, today anchor-hour]
+     * <p>
+     * - Else:
+     * "evening window": [today anchor-hour, today evening-end-hour]
+     * <p>
+     * Local time is computed in the configured zone (e.g. Asia/Shanghai),
+     * and the window is converted to UTC for querying arXiv.
+     *
+     * @return list of papers within the selected time window.
      */
-    public List<Paper> fetchPapersByDate(LocalDate dateET) throws Exception
+    public List<Paper> fetchTodayPapers() throws Exception
     {
-        String from = dateET.format(DateTimeFormatter.ISO_DATE);
-        String until = from;
+        ZoneId zone = getZoneId();
+        ZonedDateTime nowLocal = ZonedDateTime.now(zone);
+        LocalDate today = nowLocal.toLocalDate();
 
+        // Configured anchor and evening-end times in local zone
+        LocalTime anchorTime = LocalTime.of(windowAnchorHour, 0);
+        LocalTime eveningEndTime = LocalTime.of(windowEveningEndHour, 0);
+
+        ZonedDateTime todayAnchor = today.atTime(anchorTime).atZone(zone);
+        ZonedDateTime todayEveningEnd = today.atTime(eveningEndTime).atZone(zone);
+
+        ZonedDateTime startLocal;
+        ZonedDateTime endLocal;
+
+        // If current time is before the evening-end-hour, treat as "morning window"
+        if (nowLocal.toLocalTime().isBefore(eveningEndTime))
+        {
+            // Morning job:
+            //   window = [yesterday anchor-hour, today anchor-hour]
+            endLocal = todayAnchor;
+            startLocal = endLocal.minusDays(1);
+        } else
+        {
+            // Evening job:
+            //   window = [today anchor-hour, today evening-end-hour]
+            startLocal = todayAnchor;
+            endLocal = todayEveningEnd;
+        }
+
+        return fetchPapersBySubmittedDateRange(startLocal, endLocal);
+    }
+
+    /**
+     * Fetch papers submitted within a given time range.
+     * <p>
+     * Input start/end timestamps are in the configured local time zone.
+     * They are converted to UTC (GMT) and then used to build a
+     * "submittedDate" range filter for the arXiv export API:
+     * <p>
+     * submittedDate:[YYYYMMDDHHmm TO YYYYMMDDHHmm]
+     *
+     * @param startLocal start of the window in local time (inclusive)
+     * @param endLocal   end of the window in local time (inclusive)
+     * @return list of deduplicated papers across all configured categories
+     */
+    private List<Paper> fetchPapersBySubmittedDateRange(ZonedDateTime startLocal,
+                                                        ZonedDateTime endLocal) throws Exception
+    {
+
+        // 1) Convert local time to UTC (GMT)
+        ZonedDateTime startUtc = startLocal.withZoneSameInstant(ZoneOffset.UTC);
+        ZonedDateTime endUtc = endLocal.withZoneSameInstant(ZoneOffset.UTC);
+
+        // 2) Format to yyyyMMddHHmm as required by "submittedDate" filter
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMddHHmm");
+        String fromStr = startUtc.format(fmt);
+        String toStr = endUtc.format(fmt);
+
+        // 3) Resolve category list from configuration
         List<String> categoryList = Arrays.stream(
-                        Optional.ofNullable(categoriesCsv).orElse("cs.AI").split(","))
-                .map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
+                        Optional.ofNullable(categoriesCsv).orElse("cs.DB").split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toList());
 
         Map<String, Paper> merged = new LinkedHashMap<>();
 
         for (String cat : categoryList)
         {
-            String set = toOaiSet(cat); // e.g., cs.AI -> cs:cs:AI
-            if (set == null) continue;
+            int startIndex = 0;
+            int pageSize = 200;  // Number of results per page (tunable)
 
-            String token = null;
-            do
+            while (true)
             {
-                URI uri = (token == null)
-                        ? buildListRecordsUri(oaiUrl, from, until, set)
-                        : buildListRecordsWithTokenUri(oaiUrl, token);
-
+                URI uri = buildExportApiUri(cat, fromStr, toStr, startIndex, pageSize);
                 String xml = httpGet(uri);
-                ParseResult pr = parseOaiListRecords(xml);
-                token = pr.resumptionToken;
 
-                for (ArxivItem it : pr.records)
+                List<ArxivEntry> entries = parseArxivAtom(xml);
+                if (entries.isEmpty())
                 {
-                    String authors = String.join(", ", it.authors);
-                    Paper p = new Paper(
-                            it.idNoVersion,
-                            it.title,
-                            authors,
-                            it.abstractText,
-                            "https://arxiv.org/abs/" + it.idNoVersion
-                    );
-                    merged.putIfAbsent(it.idNoVersion, p); // deduplicate across categories
+                    break;
                 }
-            } while (token != null && !token.isBlank());
+
+                for (ArxivEntry e : entries)
+                {
+                    String authors = String.join(", ", e.authors);
+                    Paper p = new Paper(
+                            e.idNoVersion,
+                            e.title,
+                            authors,
+                            e.abstractText,
+                            "https://arxiv.org/abs/" + e.idNoVersion
+                    );
+                    // Deduplicate across categories by id (no version)
+                    merged.putIfAbsent(e.idNoVersion, p);
+                }
+
+                if (entries.size() < pageSize)
+                {
+                    // Last page for this category
+                    break;
+                }
+                startIndex += pageSize;
+            }
         }
 
         return new ArrayList<>(merged.values());
     }
 
-    // ---------------- HTTP & URI ----------------
-
-    private static URI buildListRecordsUri(String base, String from, String until, String set)
+    /**
+     * Build URI for the arXiv export API query.
+     * <p>
+     * Example search_query:
+     * (cat:cs.DB) AND submittedDate:[202511130900 TO 202511140900]
+     */
+    private URI buildExportApiUri(String category,
+                                  String submittedFrom,
+                                  String submittedTo,
+                                  int start,
+                                  int maxResults)
     {
-        String url = String.format(
-                "%s?verb=ListRecords&metadataPrefix=arXiv&from=%s&until=%s&set=%s",
-                base, from, until, urlEncode(set)
+
+        String searchQuery = String.format(
+                "(cat:%s) AND submittedDate:[%s TO %s]",
+                category, submittedFrom, submittedTo
         );
+
+        String encoded = urlEncode(searchQuery);
+
+        String url = String.format(
+                "%s?search_query=%s&start=%d&max_results=%d&sortBy=submittedDate&sortOrder=ascending",
+                exportUrl,
+                encoded,
+                start,
+                maxResults
+        );
+
         return URI.create(url);
     }
 
-    private static URI buildListRecordsWithTokenUri(String base, String token)
-    {
-        return URI.create(String.format("%s?verb=ListRecords&resumptionToken=%s",
-                base, urlEncode(token)));
-    }
-
+    /**
+     * Simple HTTP GET with basic retry for transient connection issues.
+     */
     private String httpGet(URI uri) throws Exception
     {
         HttpRequest req = HttpRequest.newBuilder(uri)
@@ -146,8 +278,10 @@ public class ArxivCrawlerService
             attempts++;
             try
             {
-                return http.send(req, BodyHandlers.ofString()).body();
-            } catch (java.net.ConnectException | java.net.http.HttpTimeoutException e)
+                HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+                return resp.body();
+            } catch (java.net.ConnectException |
+                     java.net.http.HttpTimeoutException e)
             {
                 if (attempts >= 3)
                 {
@@ -158,112 +292,71 @@ public class ArxivCrawlerService
         }
     }
 
-    // ---------------- OAI-PMH XML Parsing ----------------
-
-    private static ParseResult parseOaiListRecords(String xml) throws Exception
+    /**
+     * Parse arXiv Atom XML returned by the export API into a list of entries.
+     */
+    private static List<ArxivEntry> parseArxivAtom(String xml) throws Exception
     {
         Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
-                .parse(new java.io.ByteArrayInputStream(xml.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                .parse(new java.io.ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
         doc.getDocumentElement().normalize();
 
-        String token = null;
-        NodeList tokenNodes = doc.getElementsByTagName("resumptionToken");
-        if (tokenNodes.getLength() > 0)
+        List<ArxivEntry> out = new ArrayList<>();
+        NodeList entries = doc.getElementsByTagName("entry");
+
+        for (int i = 0; i < entries.getLength(); i++)
         {
-            token = text(tokenNodes.item(0));
-            if (token != null) token = token.trim();
-        }
+            Element entry = (Element) entries.item(i);
 
-        List<ArxivItem> out = new ArrayList<>();
-        NodeList recs = doc.getElementsByTagName("record");
-
-        for (int i = 0; i < recs.getLength(); i++)
-        {
-            Element rec = (Element) recs.item(i);
-
-            // Skip deleted records
-            Element header = first(rec, "header");
-            if (header != null)
+            // <id> e.g. http://arxiv.org/abs/2501.01234v1
+            String idText = nullToEmpty(text(first(entry, "id")));
+            String arxivIdWithVersion = extractArxivIdFromAtomId(idText);
+            if (arxivIdWithVersion == null || arxivIdWithVersion.isBlank())
             {
-                String status = header.getAttribute("status");
-                if ("deleted".equalsIgnoreCase(status))
-                {
-                    continue;
-                }
+                continue;
             }
 
-            // Parse arXiv identifier (e.g., oai:arXiv:2501.01234v1)
-            String identifier = text(first(rec, "header", "identifier"));
-            String arxivIdWithVersion = extractArxivIdFromOaiIdentifier(identifier);
-            if (arxivIdWithVersion == null || arxivIdWithVersion.isBlank()) continue;
             String idNoVersion = stripVersion(arxivIdWithVersion);
+            String title = nullToEmpty(text(first(entry, "title")));
+            String abs = nullToEmpty(text(first(entry, "summary")));
 
-            // Metadata section
-            Element md = first(rec, "metadata");
-            if (md == null) continue;
-            Element arxiv = first(md, "arXiv");
-            if (arxiv == null) continue;
-
-            String title = nullToEmpty(text(first(arxiv, "title")));
-            String abs = nullToEmpty(text(first(arxiv, "abstract")));
-            String created = text(first(arxiv, "created"));
-
-            // Parse authors
+            // Authors
             List<String> authors = new ArrayList<>();
-            Element authorsEl = first(arxiv, "authors");
-            if (authorsEl != null)
+            NodeList authorNodes = entry.getElementsByTagName("author");
+            for (int j = 0; j < authorNodes.getLength(); j++)
             {
-                NodeList aNodes = authorsEl.getElementsByTagName("author");
-                for (int j = 0; j < aNodes.getLength(); j++)
+                Element a = (Element) authorNodes.item(j);
+                String name = text(first(a, "name"));
+                if (name != null && !name.isBlank())
                 {
-                    Element a = (Element) aNodes.item(j);
-                    String keyname = text(first(a, "keyname"));
-                    String forenames = text(first(a, "forenames"));
-                    String full = (forenames == null || forenames.isBlank())
-                            ? safe(keyname)
-                            : (forenames + " " + safe(keyname)).trim();
-                    if (!full.isBlank()) authors.add(full);
+                    authors.add(name.trim());
                 }
             }
 
-            ArxivItem item = new ArxivItem();
-            item.idNoVersion = idNoVersion;
-            item.idWithVersion = arxivIdWithVersion;
-            item.title = title;
-            item.abstractText = abs;
-            item.authors = authors;
-            item.created = parseInstantDate(created);
-            out.add(item);
+            ArxivEntry e = new ArxivEntry();
+            e.idNoVersion = idNoVersion;
+            e.idWithVersion = arxivIdWithVersion;
+            e.title = title;
+            e.abstractText = abs;
+            e.authors = authors;
+
+            out.add(e);
         }
 
-        ParseResult pr = new ParseResult();
-        pr.records = out;
-        pr.resumptionToken = (token != null && !token.isBlank()) ? token : null;
-        return pr;
-    }
-
-    // ---------------- Utilities ----------------
-
-    /**
-     * Converts cs.AI -> cs:cs:AI (OAI set name format).
-     */
-    private static String toOaiSet(String cat)
-    {
-        if (cat == null || !cat.contains(".")) return null;
-        String[] p = cat.split("\\.");
-        return p[0] + ":" + p[0] + ":" + p[1];
+        return out;
     }
 
     /**
-     * Extracts arXiv ID (with version) from oai:arXiv:XXXXvY safely.
+     * Extract arXiv ID (with version) from Atom <id> value.
+     * <p>
+     * Example:
+     * http://arxiv.org/abs/2501.01234v1 -> 2501.01234v1
      */
-    private static String extractArxivIdFromOaiIdentifier(String s)
+    private static String extractArxivIdFromAtomId(String s)
     {
         if (s == null) return null;
         s = s.trim();
-        Matcher m = Pattern.compile("^oai:arXiv:(\\S+)$").matcher(s);
-        if (m.find()) return m.group(1);
-        int idx = s.lastIndexOf(':');
+        int idx = s.lastIndexOf('/');
         if (idx >= 0 && idx + 1 < s.length())
         {
             return s.substring(idx + 1).trim();
@@ -272,7 +365,10 @@ public class ArxivCrawlerService
     }
 
     /**
-     * Removes version suffix (2501.01234v2 -> 2501.01234).
+     * Remove version suffix from an arXiv ID.
+     * <p>
+     * Example:
+     * 2501.01234v2 -> 2501.01234
      */
     private static String stripVersion(String arxivId)
     {
@@ -285,23 +381,10 @@ public class ArxivCrawlerService
     {
         try
         {
-            return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8);
+            return URLEncoder.encode(s, StandardCharsets.UTF_8.toString());
         } catch (Exception e)
         {
             return s;
-        }
-    }
-
-    private static Instant parseInstantDate(String yyyyMmDd)
-    {
-        if (yyyyMmDd == null || yyyyMmDd.isBlank()) return null;
-        try
-        {
-            LocalDate d = LocalDate.parse(yyyyMmDd, DateTimeFormatter.ISO_DATE);
-            return d.atStartOfDay(ZoneOffset.UTC).toInstant();
-        } catch (Exception e)
-        {
-            return null;
         }
     }
 
@@ -310,12 +393,6 @@ public class ArxivCrawlerService
         if (parent == null) return null;
         NodeList nl = parent.getElementsByTagName(tag);
         return nl.getLength() > 0 ? (Element) nl.item(0) : null;
-    }
-
-    private static Element first(Element parent, String tag1, String tag2)
-    {
-        Element mid = first(parent, tag1);
-        return first(mid, tag2);
     }
 
     private static String text(Node node)
@@ -328,26 +405,15 @@ public class ArxivCrawlerService
         return (s == null) ? "" : s.trim();
     }
 
-    private static String safe(String s)
+    /**
+     * Internal structure representing one arXiv entry from the Atom feed.
+     */
+    private static class ArxivEntry
     {
-        return (s == null) ? "" : s;
-    }
-
-    // ---------------- Internal Structures ----------------
-
-    private static class ArxivItem
-    {
-        String idNoVersion;     // e.g., 2501.01234
-        String idWithVersion;   // e.g., 2501.01234v1
+        String idNoVersion;
+        String idWithVersion;
         String title;
         String abstractText;
         List<String> authors;
-        Instant created;
-    }
-
-    private static class ParseResult
-    {
-        List<ArxivItem> records;
-        String resumptionToken;
     }
 }

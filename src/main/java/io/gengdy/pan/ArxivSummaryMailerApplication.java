@@ -58,12 +58,30 @@ public class ArxivSummaryMailerApplication implements CommandLineRunner
         }
     }
 
-    @Scheduled(cron = "${pan.schedule.cron:0 0 10 ? * MON-FRI}", zone = "${pan.schedule.zone:Asia/Shanghai}")
-    public void scheduledTask()
+    /**
+     * Morning schedule (e.g. 10:00, Asia/Shanghai).
+     * Cron is configured via pan.schedule.cron-morning.
+     */
+    @Scheduled(cron = "${pan.schedule.cron-morning}", zone = "${pan.schedule.zone:Asia/Shanghai}")
+    public void morningScheduledTask()
     {
         if (mode.equalsIgnoreCase("deamon"))
         {
-            logger.info("[Mode: Deamon] Scheduled trigger fired.");
+            logger.info("[Mode: Deamon] Morning Scheduled trigger fired.");
+            executeTask();
+        }
+    }
+
+    /**
+     * Evening schedule (e.g. 22:00, Asia/Shanghai).
+     * Cron is configured via pan.schedule.cron-evening.
+     */
+    @Scheduled(cron = "${pan.schedule.cron-evening}", zone = "${pan.schedule.zone:Asia/Shanghai}")
+    public void eveningScheduledTask()
+    {
+        if (mode.equalsIgnoreCase("deamon"))
+        {
+            logger.info("[Mode: Deamon] Evening Scheduled trigger fired.");
             executeTask();
         }
     }
