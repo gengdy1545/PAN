@@ -139,9 +139,9 @@ public class ArxivCrawlerService
         if (nowLocal.toLocalTime().isBefore(eveningEndTime))
         {
             // Morning job:
-            //   window = [yesterday anchor-hour, today anchor-hour]
+            //   window = [yesterday evening-end-hour, today anchor-hour]
+            startLocal = todayEveningEnd.minusDays(1);
             endLocal = todayAnchor;
-            startLocal = endLocal.minusDays(1);
         } else
         {
             // Evening job:
