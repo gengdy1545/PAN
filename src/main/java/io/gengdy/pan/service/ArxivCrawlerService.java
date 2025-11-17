@@ -19,26 +19,21 @@ import java.util.stream.Collectors;
 
 /**
  * ArxivCrawlerService
- * <p>
- * Fetches papers from arXiv using the export API:
- * https://export.arxiv.org/api/query
- * <p>
- * Time window logic (configurable zone, typically Asia/Shanghai):
- * <p>
- * - Morning job (around anchor-hour, e.g. 09:00 local time):
- * Fetch papers submitted in [yesterday anchor-hour, today anchor-hour]
- * <p>
- * - Evening job (around evening-end-hour, e.g. 21:00 local time):
- * Fetch papers submitted in [today anchor-hour, today evening-end-hour]
- * <p>
- * Which window is used is determined by the current local time:
- * - If now < evening-end-hour  -> morning window
- * - Else                       -> evening window
- * <p>
- * NOTE: In practice, this service is triggered by two cron jobs:
- * pan.schedule.cron-morning (at anchor-hour)
- * pan.schedule.cron-evening (at evening-end-hour)
- * so the above logic aligns naturally with the cron configuration.
+ *
+ * Simplified version:
+ * -------------------------------------------------------
+ * We now run a single daily job (e.g., 10:00 local time).
+ * The fetch window is always:
+ *
+ *   [yesterday anchor-hour, today anchor-hour]
+ *
+ * Example:
+ *   anchor-hour = 10
+ *   Daily job at 10:00 → fetch papers submitted in:
+ *     [yesterday 10:00 → today 10:00]
+ *
+ * No more morning/evening split logic.
+ * -------------------------------------------------------
  */
 @Service
 public class ArxivCrawlerService
@@ -65,18 +60,11 @@ public class ArxivCrawlerService
     private String zoneIdString;
 
     /**
-     * Anchor hour for the daily window (0-23, local time).
-     * Morning window: [yesterday anchor-hour, today anchor-hour]
+     * Daily anchor hour (0-23).
+     * Daily window: [yesterday @ anchor-hour → today @ anchor-hour].
      */
-    @Value("${pan.window.anchor-hour:9}")
+    @Value("${pan.window.anchor-hour:10}")
     private int windowAnchorHour;
-
-    /**
-     * Evening window end hour (0-23, local time).
-     * Evening window: [today anchor-hour, today evening-end-hour]
-     */
-    @Value("${pan.window.evening-end-hour:21}")
-    private int windowEveningEndHour;
 
     /**
      * Parsed ZoneId, lazily initialized from configuration.
@@ -104,82 +92,51 @@ public class ArxivCrawlerService
     }
 
     /**
-     * Entry point used by scheduled tasks.
-     * <p>
-     * Window selection:
-     * <p>
-     * - If current local time < evening-end-hour:
-     * "morning window": [yesterday anchor-hour, today anchor-hour]
-     * <p>
-     * - Else:
-     * "evening window": [today anchor-hour, today evening-end-hour]
-     * <p>
-     * Local time is computed in the configured zone (e.g. Asia/Shanghai),
-     * and the window is converted to UTC for querying arXiv.
+     * Daily fetch entry point (called by @Scheduled job).
      *
-     * @return list of papers within the selected time window.
+     * Always compute:
+     *   startLocal = yesterday @ anchor-hour
+     *   endLocal   = today    @ anchor-hour
+     *
+     * @return list of papers in the 24h window.
      */
     public List<Paper> fetchTodayPapers() throws Exception
     {
         ZoneId zone = getZoneId();
         ZonedDateTime nowLocal = ZonedDateTime.now(zone);
+
+        // Today as defined by local zone (e.g., Asia/Shanghai)
         LocalDate today = nowLocal.toLocalDate();
 
-        // Configured anchor and evening-end times in local zone
         LocalTime anchorTime = LocalTime.of(windowAnchorHour, 0);
-        LocalTime eveningEndTime = LocalTime.of(windowEveningEndHour, 0);
 
-        ZonedDateTime todayAnchor = today.atTime(anchorTime).atZone(zone);
-        ZonedDateTime todayEveningEnd = today.atTime(eveningEndTime).atZone(zone);
+        // Today's anchor time = end of window
+        ZonedDateTime endLocal = today.atTime(anchorTime).atZone(zone);
 
-        ZonedDateTime startLocal;
-        ZonedDateTime endLocal;
-
-        // If current time is before the evening-end-hour, treat as "morning window"
-        if (nowLocal.toLocalTime().isBefore(eveningEndTime))
-        {
-            // Morning job:
-            //   window = [yesterday evening-end-hour, today anchor-hour]
-            startLocal = todayEveningEnd.minusDays(1);
-            endLocal = todayAnchor;
-        } else
-        {
-            // Evening job:
-            //   window = [today anchor-hour, today evening-end-hour]
-            startLocal = todayAnchor;
-            endLocal = todayEveningEnd;
-        }
+        // Yesterday’s anchor time = start of window
+        ZonedDateTime startLocal = endLocal.minusDays(1);
 
         return fetchPapersBySubmittedDateRange(startLocal, endLocal);
     }
 
     /**
-     * Fetch papers submitted within a given time range.
-     * <p>
-     * Input start/end timestamps are in the configured local time zone.
-     * They are converted to UTC (GMT) and then used to build a
-     * "submittedDate" range filter for the arXiv export API:
-     * <p>
-     * submittedDate:[YYYYMMDDHHmm TO YYYYMMDDHHmm]
-     *
-     * @param startLocal start of the window in local time (inclusive)
-     * @param endLocal   end of the window in local time (inclusive)
-     * @return list of deduplicated papers across all configured categories
+     * Fetch papers submitted within a local-time window.
+     * The window is converted to UTC for arXiv's "submittedDate".
      */
-    private List<Paper> fetchPapersBySubmittedDateRange(ZonedDateTime startLocal,
-                                                        ZonedDateTime endLocal) throws Exception
-    {
+    private List<Paper> fetchPapersBySubmittedDateRange(
+            ZonedDateTime startLocal,
+            ZonedDateTime endLocal) throws Exception
+            {
 
-        // 1) Convert local time to UTC (GMT)
+        // Convert local → UTC
         ZonedDateTime startUtc = startLocal.withZoneSameInstant(ZoneOffset.UTC);
         ZonedDateTime endUtc = endLocal.withZoneSameInstant(ZoneOffset.UTC);
 
-        // 2) Format to yyyyMMddHHmm as required by "submittedDate" filter
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMddHHmm");
         String fromStr = startUtc.format(fmt);
         String toStr = endUtc.format(fmt);
 
-        // 3) Resolve category list from configuration
+        // Category list
         List<String> categoryList = Arrays.stream(
                         Optional.ofNullable(categoriesCsv).orElse("cs.DB").split(","))
                 .map(String::trim)
@@ -267,8 +224,10 @@ public class ArxivCrawlerService
     private String httpGet(URI uri) throws Exception
     {
         HttpRequest req = HttpRequest.newBuilder(uri)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .timeout(java.time.Duration.ofSeconds(20))
+                .header("User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .timeout(Duration.ofSeconds(20))
                 .GET()
                 .build();
 
@@ -281,8 +240,8 @@ public class ArxivCrawlerService
                 HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
                 return resp.body();
             } catch (java.net.ConnectException |
-                     java.net.http.HttpTimeoutException e)
-            {
+                        java.net.http.HttpTimeoutException e)
+                        {
                 if (attempts >= 3)
                 {
                     throw new RuntimeException("Connect failed after " + attempts + " attempts. URI=" + uri, e);
