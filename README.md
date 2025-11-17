@@ -3,6 +3,8 @@
 **PAN (Paper is All you need)** is a robust, automated tool designed to keep researchers and enthusiasts up-to-date with the latest academic papers.
 It periodically crawls Arxiv for new submissions, generates concise, beginner-friendly summaries using Google's Gemini 1.5 Flash model, and delivers a daily digest directly to your inbox.
 
+![demo mail](pictures/demo.png)
+
 ## 🛠️ Prerequisites
 * **Java 17** or later
 * **Maven** 3.6+
