@@ -27,7 +27,7 @@ source ~/.bashrc
 
 Run the provided installation script from the project root directory.
 
-```bashbash
+```bash
 ./install.sh
 ```
 
@@ -51,7 +51,7 @@ mailer.recipients=subscriber1@example.com, subscriber2@example.com
 
 # --- Google Gemini AI ---
 gemini.api-key=YOUR_GEMINI_API_KEY
-gemini.model-name=gemini-1.5-flash
+gemini.model-name=gemini-2.5-flash-lite
 
 # --- Arxiv Settings ---
 # Comma-separated categories (e.g., cs.AI, cs.LG, cs.CV)
@@ -65,7 +65,7 @@ pan.schedule.cron=0 0 10 ? * MON-FRI
 
 ### 4. Launch the Application
 
-In local **deamon** mode, the application stays running and triggers the task automatically according to pan.schedule.cron.
+In local **daemon** mode, the application stays running and triggers the task automatically according to pan.schedule.cron.
 
 ```bash
 # Start in foreground

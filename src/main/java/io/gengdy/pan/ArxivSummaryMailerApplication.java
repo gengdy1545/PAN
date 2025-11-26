@@ -25,7 +25,7 @@ public class ArxivSummaryMailerApplication implements CommandLineRunner
     private final GeminiAIService geminiAIService;
     private final MailSenderService mailSenderService;
 
-    @Value("${pan.mode:deamon}")
+    @Value("${pan.mode:daemon}")
     private String mode;
 
     public ArxivSummaryMailerApplication(ArxivCrawlerService crawlerService,
@@ -61,9 +61,9 @@ public class ArxivSummaryMailerApplication implements CommandLineRunner
     @Scheduled(cron = "${pan.schedule.cron:0 0 10 ? * MON-FRI}", zone = "${pan.schedule.zone:Asia/Shanghai}")
     public void scheduledTask()
     {
-        if (mode.equalsIgnoreCase("deamon"))
+        if (mode.equalsIgnoreCase("daemon"))
         {
-            logger.info("[Mode: Deamon] Scheduled trigger fired.");
+            logger.info("[Mode: Daemon] Scheduled trigger fired.");
             executeTask();
         }
     }
